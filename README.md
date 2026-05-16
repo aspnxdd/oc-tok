@@ -33,7 +33,7 @@ The dashboard scans:
 - `~/.local/share/opencode/storage/message/` — individual message JSONs (`msg_*.json`)
 - `~/.local/share/opencode/storage/session/` — session metadata mapping session IDs to working directories
 
-Only assistant messages are counted. Token fields (`input`, `output`, `reasoning`, `cache`) and `cost` are aggregated per repository and date.
+Only assistant messages are counted. `input` and `output` token fields and `cost` are aggregated per repository and date.
 
 ## Tech Stack
 

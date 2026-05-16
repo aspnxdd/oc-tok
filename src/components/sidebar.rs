@@ -1,204 +1,145 @@
 use freya::prelude::*;
-use freya::radio::*;
+use freya::radio::use_radio;
 
-use crate::data::DateRange;
-use crate::state::{AppChannel, update_all_stats, update_dashboard_stats};
+use crate::data::{DateRange, MessageData, RepoStats};
+use crate::state::AppChannel;
 
 #[derive(PartialEq)]
 pub struct Sidebar;
 
 impl Component for Sidebar {
     fn render(&self) -> impl IntoElement {
-        let radio = use_radio(AppChannel::Selection);
-        let state = radio.read();
-        let is_loading = state.is_loading;
-        let date_range = state.date_range.clone();
-        let last_updated = state.last_updated.clone();
-        drop(state);
-
-        let mut radio_7 = radio.clone();
-        let on_7days = move |_| {
-            let mut s = radio_7.write();
-            s.date_range = DateRange::Last7Days;
-            update_all_stats(&mut s);
+        let theme = use_theme();
+        let radio = use_radio(AppChannel::All);
+        let (is_loading, date_range, last_updated) = {
+            let state = radio.read();
+            (
+                state.is_loading,
+                state.date_range.clone(),
+                state.last_updated.clone(),
+            )
         };
-
-        let mut radio_30 = radio.clone();
-        let on_30days = move |_| {
-            let mut s = radio_30.write();
-            s.date_range = DateRange::Last30Days;
-            update_all_stats(&mut s);
-        };
-
-        let mut radio_all = radio.clone();
-        let on_all = move |_| {
-            let mut s = radio_all.write();
-            s.date_range = DateRange::AllTime;
-            update_all_stats(&mut s);
-        };
-
-        let mut radio_update = radio.clone();
-        let on_update = move |_| {
-            let mut s = radio_update.write();
-            s.is_loading = true;
-            let messages = crate::data::scan_opencode_data();
-            s.messages = messages;
-            update_all_stats(&mut s);
-            s.is_loading = false;
-            s.last_updated = Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
-        };
+        let colors = &theme.read().colors;
+        let background = colors.surface_tertiary;
+        let border = colors.border;
 
         rect()
             .width(Size::px(320.))
             .height(Size::fill())
-            .background((24, 24, 27))
+            .background(background)
             .border(
                 Border::new()
                     .width(BorderWidth {
-                        top: 0.,
                         right: 1.,
-                        bottom: 0.,
-                        left: 0.,
+                        ..BorderWidth::default()
                     })
-                    .fill((46, 46, 51)),
+                    .fill(border),
             )
-            .padding(Gaps::new(16., 16., 16., 16.))
+            .padding(Gaps::new_all(16.))
             .vertical()
             .spacing(16.)
+            .content(Content::Flex)
+            .child(section_heading("Repositories"))
+            .child(RepoList)
+            .child(DateRangeSection {
+                current: date_range,
+            })
+            .child(RefreshSection {
+                is_loading,
+                last_updated,
+            })
+    }
+}
+
+#[derive(PartialEq)]
+struct DateRangeSection {
+    current: DateRange,
+}
+
+impl Component for DateRangeSection {
+    fn render(&self) -> impl IntoElement {
+        let radio = use_radio(AppChannel::All);
+
+        let options = [
+            ("7 Days", DateRange::Last7Days),
+            ("30 Days", DateRange::Last30Days),
+            ("All", DateRange::AllTime),
+        ];
+
+        rect()
+            .vertical()
+            .spacing(10.)
+            .width(Size::fill())
+            .child(section_heading("Date Range"))
             .child(
-                label()
-                    .text("Repositories")
-                    .font_size(13.)
-                    .font_weight(FontWeight::BOLD)
-                    .color((160, 160, 160)),
-            )
-            .child(rect().expanded().vertical().child(RepoList {}))
-            .child(
-                rect()
-                    .vertical()
-                    .spacing(10.)
-                    .width(Size::fill())
-                    .child(
-                        label()
-                            .text("Date Range")
-                            .font_size(13.)
-                            .font_weight(FontWeight::BOLD)
-                            .color((160, 160, 160)),
-                    )
-                    .child(
-                        rect()
-                            .horizontal()
-                            .spacing(6.)
-                            .width(Size::fill())
-                            .child(
-                                rect()
-                                    .background(if date_range == DateRange::Last7Days {
-                                        (255, 122, 0)
-                                    } else {
-                                        (42, 42, 46)
-                                    })
-                                    .corner_radius(CornerRadius::new_all(99.))
-                                    .center()
-                                    .padding(Gaps::new(8., 14., 8., 14.))
-                                    .on_mouse_up(on_7days)
-                                    .child(
-                                        label()
-                                            .text("7 Days")
-                                            .color(if date_range == DateRange::Last7Days {
-                                                (255, 255, 255)
-                                            } else {
-                                                (160, 160, 160)
-                                            })
-                                            .font_size(12.)
-                                            .font_weight(FontWeight::SEMI_BOLD),
-                                    ),
-                            )
-                            .child(
-                                rect()
-                                    .background(if date_range == DateRange::Last30Days {
-                                        (255, 122, 0)
-                                    } else {
-                                        (42, 42, 46)
-                                    })
-                                    .corner_radius(CornerRadius::new_all(99.))
-                                    .center()
-                                    .padding(Gaps::new(8., 14., 8., 14.))
-                                    .on_mouse_up(on_30days)
-                                    .child(
-                                        label()
-                                            .text("30 Days")
-                                            .color(if date_range == DateRange::Last30Days {
-                                                (255, 255, 255)
-                                            } else {
-                                                (160, 160, 160)
-                                            })
-                                            .font_size(12.)
-                                            .font_weight(FontWeight::SEMI_BOLD),
-                                    ),
-                            )
-                            .child(
-                                rect()
-                                    .background(if date_range == DateRange::AllTime {
-                                        (255, 122, 0)
-                                    } else {
-                                        (42, 42, 46)
-                                    })
-                                    .corner_radius(CornerRadius::new_all(99.))
-                                    .center()
-                                    .padding(Gaps::new(8., 14., 8., 14.))
-                                    .on_mouse_up(on_all)
-                                    .child(
-                                        label()
-                                            .text("All")
-                                            .color(if date_range == DateRange::AllTime {
-                                                (255, 255, 255)
-                                            } else {
-                                                (160, 160, 160)
-                                            })
-                                            .font_size(12.)
-                                            .font_weight(FontWeight::SEMI_BOLD),
-                                    ),
-                            ),
-                    ),
-            )
-            .child(
-                rect()
-                    .vertical()
-                    .spacing(8.)
-                    .width(Size::fill())
-                    .child(
-                        rect()
-                            .background(if is_loading {
-                                (120, 70, 0)
-                            } else {
-                                (255, 122, 0)
-                            })
-                            .corner_radius(CornerRadius::new_all(10.))
-                            .center()
-                            .padding(Gaps::new(10., 16., 10., 16.))
-                            .width(Size::fill())
-                            .on_mouse_up(on_update)
-                            .child(
-                                label()
-                                    .text(if is_loading {
-                                        "Loading..."
-                                    } else {
-                                        "Update Data"
-                                    })
-                                    .color((255, 255, 255))
-                                    .font_size(13.)
-                                    .font_weight(FontWeight::BOLD),
-                            ),
-                    )
-                    .maybe(last_updated.is_some(), |r| {
-                        r.child(
-                            label()
-                                .text(format!("Updated: {}", last_updated.as_ref().unwrap()))
-                                .font_size(10.)
-                                .color((120, 120, 120)),
+                options
+                    .into_iter()
+                    .fold(SegmentedButton::new(), |group, (label, range)| {
+                        let selected = self.current == range;
+                        let mut radio = radio;
+                        group.child(
+                            ButtonSegment::new()
+                                .key(label)
+                                .selected(selected)
+                                .on_press(move |_| {
+                                    let mut state = radio.write();
+                                    if state.date_range == range {
+                                        return;
+                                    }
+                                    state.date_range = range.clone();
+                                    state.refresh_all();
+                                })
+                                .child(label),
                         )
                     }),
             )
+    }
+}
+
+#[derive(PartialEq)]
+struct RefreshSection {
+    is_loading: bool,
+    last_updated: Option<String>,
+}
+
+impl Component for RefreshSection {
+    fn render(&self) -> impl IntoElement {
+        let mut radio = use_radio(AppChannel::All);
+        let placeholder_color = use_theme().read().colors.text_placeholder;
+
+        let on_refresh = move |_| {
+            let mut state = radio.write();
+            state.is_loading = true;
+            state.messages = MessageData::scan_opencode();
+            state.refresh_all();
+            state.last_updated = Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
+            state.is_loading = false;
+        };
+
+        rect()
+            .vertical()
+            .spacing(8.)
+            .width(Size::fill())
+            .child(
+                Button::new()
+                    .filled()
+                    .expanded()
+                    .enabled(!self.is_loading)
+                    .on_press(on_refresh)
+                    .child(if self.is_loading {
+                        "Loading..."
+                    } else {
+                        "Update Data"
+                    }),
+            )
+            .map(self.last_updated.as_deref(), |section, stamp| {
+                section.child(
+                    label()
+                        .text(format!("Updated: {stamp}"))
+                        .font_size(10.)
+                        .color(placeholder_color),
+                )
+            })
     }
 }
 
@@ -207,96 +148,110 @@ struct RepoList;
 
 impl Component for RepoList {
     fn render(&self) -> impl IntoElement {
-        let radio = use_radio(AppChannel::Selection);
-        let state = radio.read();
-        let repo_stats = state.repo_stats.clone();
-        let selected_repo = state.selected_repo.clone();
-        let repo_stats_len = repo_stats.len();
-        drop(state);
+        let radio = use_radio(AppChannel::All);
+        let (repo_stats, selected_repo) = {
+            let state = radio.read();
+            (state.repo_stats.clone(), state.selected_repo.clone())
+        };
+        let len = repo_stats.len();
 
-        VirtualScrollView::new(move |i, _| {
-                if i >= repo_stats.len() {
-                    return rect().into();
-                }
-                let repo = &repo_stats[i];
-                let path = repo.path.clone();
-                let name = repo.name.clone();
-                let is_selected = selected_repo.as_ref() == Some(&path);
-                let count = repo.message_count;
-
-                let mut radio_click = radio.clone();
-                let path_for_click = path.clone();
-                let on_click = move |_| {
-                    let mut s = radio_click.write();
-                    if s.selected_repo.as_ref() == Some(&path_for_click) {
-                        s.selected_repo = None;
-                    } else {
-                        s.selected_repo = Some(path_for_click.clone());
-                    }
-                    update_dashboard_stats(&mut s);
-                };
-
-                rect()
-                    .key(path.clone())
-                    .width(Size::fill())
-                    .height(Size::px(40.))
-                    .background(if is_selected {
-                        (42, 31, 21)
-                    } else {
-                        (30, 30, 34)
-                    })
-                    .corner_radius(CornerRadius::new_all(8.))
-                    .padding(Gaps::new(0., 12., 0., 12.))
-                    .on_mouse_up(on_click)
-                    .child(
-                        rect()
-                            .horizontal()
-                            .spacing(10.)
-                            .width(Size::fill())
-                            .child(
-                                rect()
-                                    .width(Size::px(3.))
-                                    .height(Size::fill())
-                                    .background(if is_selected {
-                                        (255, 122, 0)
-                                    } else {
-                                        (30, 30, 34)
-                                    })
-                                    .corner_radius(CornerRadius::new_all(2.)),
-                            )
-                            .child(
-                                rect()
-                                    .vertical()
-                                    .center()
-                                    .expanded()
-                                    .child(
-                                        label()
-                                            .text(format!("{}", name))
-                                            .font_size(13.)
-                                            .color(if is_selected {
-                                                (255, 255, 255)
-                                            } else {
-                                                (180, 180, 180)
-                                            })
-                                            .text_overflow(TextOverflow::Ellipsis),
-                                    )
-                                    .child(
-                                        label()
-                                            .text(format!("{} msgs", count))
-                                            .font_size(11.)
-                                            .color(if is_selected {
-                                                (255, 160, 60)
-                                            } else {
-                                                (120, 120, 120)
-                                            })
-                                            .text_overflow(TextOverflow::Ellipsis),
-                                    ),
-                            ),
-                    )
-                    .into()
-            })
-            .length(repo_stats_len)
-            .item_size(40.)
-            .height(Size::fill())
+        VirtualScrollView::new(move |index, _| {
+            let stats = &repo_stats[index];
+            RepoRow {
+                selected: selected_repo.as_deref() == Some(stats.path.as_str()),
+                stats: stats.clone(),
+            }
+            .into()
+        })
+        .length(len)
+        .item_size(46.)
+        .height(Size::flex(1.))
     }
+}
+
+#[derive(PartialEq)]
+struct RepoRow {
+    stats: RepoStats,
+    selected: bool,
+}
+
+impl Component for RepoRow {
+    fn render(&self) -> impl IntoElement {
+        let mut radio = use_radio(AppChannel::All);
+        let colors = &use_theme().read().colors;
+        let path = self.stats.path.clone();
+
+        let on_click = move |_| {
+            let mut state = radio.write();
+            state.selected_repo = if state.selected_repo.as_deref() == Some(path.as_str()) {
+                None
+            } else {
+                Some(path.clone())
+            };
+            state.refresh_dashboard();
+        };
+
+        let (row_bg, stripe_color, name_color, count_color) = if self.selected {
+            (
+                colors.active,
+                colors.primary,
+                colors.text_primary,
+                colors.secondary,
+            )
+        } else {
+            (
+                colors.surface_secondary,
+                colors.surface_secondary,
+                colors.text_secondary,
+                colors.text_placeholder,
+            )
+        };
+
+        rect()
+            .key(self.stats.path.clone())
+            .width(Size::fill())
+            .height(Size::px(40.))
+            .margin(Gaps::new(0., 0., 6., 0.))
+            .background(row_bg)
+            .corner_radius(CornerRadius::new_all(8.))
+            .padding(Gaps::new(0., 12., 0., 12.))
+            .on_press(on_click)
+            .horizontal()
+            .spacing(10.)
+            .child(
+                rect()
+                    .width(Size::px(3.))
+                    .height(Size::fill())
+                    .background(stripe_color)
+                    .corner_radius(CornerRadius::new_all(2.)),
+            )
+            .child(
+                rect()
+                    .vertical()
+                    .center()
+                    .expanded()
+                    .child(
+                        label()
+                            .text(self.stats.name.clone())
+                            .font_size(13.)
+                            .color(name_color)
+                            .text_overflow(TextOverflow::Ellipsis),
+                    )
+                    .child(
+                        label()
+                            .text(format!("{} msgs", self.stats.message_count))
+                            .font_size(11.)
+                            .color(count_color)
+                            .text_overflow(TextOverflow::Ellipsis),
+                    ),
+            )
+    }
+}
+
+fn section_heading(text: &str) -> impl IntoElement {
+    label()
+        .text(text.to_string())
+        .font_size(13.)
+        .font_weight(FontWeight::BOLD)
+        .color(use_theme().read().colors.text_secondary)
 }
