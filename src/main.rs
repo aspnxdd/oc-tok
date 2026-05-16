@@ -1,6 +1,7 @@
 mod app;
 mod components;
 mod data;
+mod route;
 mod state;
 
 use freya::prelude::*;

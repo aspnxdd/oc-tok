@@ -1,18 +1,17 @@
 use freya::prelude::*;
-use freya::radio::use_radio;
 
 use crate::components::plots::{DailyCostPlot, DailyTokensPlot, ModelBreakdownPlot};
 use crate::components::stats_card::StatsCard;
 use crate::data::RepoStats;
-use crate::state::AppChannel;
 
 #[derive(PartialEq)]
-pub struct Dashboard;
+pub struct Dashboard {
+    pub stats: RepoStats,
+}
 
 impl Component for Dashboard {
     fn render(&self) -> impl IntoElement {
-        let radio = use_radio(AppChannel::All);
-        let stats = radio.read().dashboard_stats.clone();
+        let stats = self.stats.clone();
         let has_data = stats.message_count > 0;
 
         rect().expanded().theme_background().child(
