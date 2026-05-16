@@ -1,11 +1,10 @@
-use freya::radio::*;
+use freya::radio::RadioChannel;
 
 use crate::data::{DateRange, MessageData, RepoStats};
 
 #[derive(Default, Clone)]
 pub struct AppState {
     pub messages: Vec<MessageData>,
-    pub repos: Vec<String>,
     pub selected_repo: Option<String>,
     pub date_range: DateRange,
     pub is_loading: bool,
@@ -14,29 +13,21 @@ pub struct AppState {
     pub dashboard_stats: RepoStats,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Copy, Hash)]
-pub enum AppChannel {
-    Data,
-    Selection,
-}
+impl AppState {
+    pub fn refresh_all(&mut self) {
+        self.repo_stats = RepoStats::aggregate(&self.messages, &self.date_range);
+        self.refresh_dashboard();
+    }
 
-impl RadioChannel<AppState> for AppChannel {
-    fn derive_channel(self, _state: &AppState) -> Vec<Self> {
-        match self {
-            AppChannel::Data => vec![AppChannel::Data, AppChannel::Selection],
-            AppChannel::Selection => vec![AppChannel::Data, AppChannel::Selection],
-        }
+    pub fn refresh_dashboard(&mut self) {
+        self.dashboard_stats =
+            RepoStats::for_dashboard(&self.repo_stats, self.selected_repo.as_deref());
     }
 }
 
-pub fn update_all_stats(state: &mut AppState) {
-    state.repos = crate::data::get_all_repo_paths(&state.messages);
-    state.repo_stats = crate::data::aggregate_repos(&state.messages, &state.date_range);
-    state.dashboard_stats =
-        crate::data::get_dashboard_stats(&state.repo_stats, state.selected_repo.as_deref());
+#[derive(PartialEq, Eq, Clone, Copy, Hash)]
+pub enum AppChannel {
+    All,
 }
 
-pub fn update_dashboard_stats(state: &mut AppState) {
-    state.dashboard_stats =
-        crate::data::get_dashboard_stats(&state.repo_stats, state.selected_repo.as_deref());
-}
+impl RadioChannel<AppState> for AppChannel {}

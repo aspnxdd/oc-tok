@@ -34,12 +34,9 @@ cargo test  # Run unit tests
 
 ### Global State — Freya Radio
 
-State lives in `AppState` and is broadcast via `AppChannel`:
+State lives in `AppState` and is broadcast via a single-variant `AppChannel::All`. Every write notifies every subscriber; consumers diff via Freya's PartialEq skip-rerender to avoid wasted work.
 
-- `AppChannel::Data` — messages, repo stats, dashboard stats, date range
-- `AppChannel::Selection` — selected repo, loading flag
-
-`derive_channel` links `Data` writes to also notify `Selection` subscribers.
+State mutations go through `AppState::refresh_all` (rebuilds `repo_stats` + `dashboard_stats`) or `AppState::refresh_dashboard` (rebuilds only `dashboard_stats`). Plots read precomputed `RepoStats::daily_sorted` / `models_sorted` so render never sorts.
 
 ### Data Source
 

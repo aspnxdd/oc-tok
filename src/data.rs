@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use chrono::{Duration, NaiveDate, Utc};
+use serde::de::DeserializeOwned;
 
 #[derive(Clone, PartialEq, Default)]
 pub enum DateRange {
@@ -10,18 +13,44 @@ pub enum DateRange {
     AllTime,
 }
 
+impl DateRange {
+    fn cutoff_ms(&self) -> i64 {
+        let window = match self {
+            DateRange::Last7Days => Some(Duration::days(7)),
+            DateRange::Last30Days => Some(Duration::days(30)),
+            DateRange::AllTime => None,
+        };
+        window.map_or(0, |w| Utc::now().timestamp_millis() - w.num_milliseconds())
+    }
+
+    fn filter<'a>(&self, messages: &'a [MessageData]) -> impl Iterator<Item = &'a MessageData> {
+        let cutoff = self.cutoff_ms();
+        messages.iter().filter(move |msg| msg.timestamp >= cutoff)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MessageData {
-    pub timestamp: u64,
+    pub timestamp: i64,
     pub model_id: String,
-    pub provider_id: String,
     pub cost: f64,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
     pub repo_path: String,
+}
+
+impl MessageData {
+    pub fn scan_opencode() -> Vec<Self> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let base = PathBuf::from(home).join(".local/share/opencode/storage");
+        let project_map = load_project_map(&base.join("project"));
+        let sessions = load_session_dirs(&base.join("session"), &project_map);
+
+        message_files_in_subdirs(&base.join("message"))
+            .filter_map(|path| read_json::<MessageJson>(&path))
+            .filter_map(|msg| msg.into_assistant_data(&sessions))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -32,7 +61,23 @@ pub struct DailyStats {
     pub messages: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+impl DailyStats {
+    fn accumulate(&mut self, msg: &MessageData) {
+        self.input += msg.input_tokens;
+        self.output += msg.output_tokens;
+        self.cost += msg.cost;
+        self.messages += 1;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cost += other.cost;
+        self.messages += other.messages;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RepoStats {
     pub path: String,
     pub name: String,
@@ -41,7 +86,108 @@ pub struct RepoStats {
     pub total_cost: f64,
     pub message_count: usize,
     pub model_breakdown: HashMap<String, u64>,
-    pub daily: HashMap<chrono::NaiveDate, DailyStats>,
+    pub daily: HashMap<NaiveDate, DailyStats>,
+    pub daily_sorted: Vec<(NaiveDate, DailyStats)>,
+    pub models_sorted: Vec<(String, u64)>,
+}
+
+impl RepoStats {
+    fn for_path(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    fn accumulate(&mut self, msg: &MessageData) {
+        self.total_input += msg.input_tokens;
+        self.total_output += msg.output_tokens;
+        self.total_cost += msg.cost;
+        self.message_count += 1;
+        *self
+            .model_breakdown
+            .entry(msg.model_id.clone())
+            .or_insert(0) += msg.input_tokens + msg.output_tokens;
+
+        let date = chrono::DateTime::from_timestamp_millis(msg.timestamp)
+            .map(|dt| dt.date_naive())
+            .unwrap_or_else(|| Utc::now().date_naive());
+        self.daily.entry(date).or_default().accumulate(msg);
+    }
+
+    fn finalize_sorted(&mut self) {
+        let mut daily: Vec<_> = self
+            .daily
+            .iter()
+            .map(|(date, stats)| (*date, stats.clone()))
+            .collect();
+        daily.sort_by_key(|(date, _)| *date);
+        self.daily_sorted = daily;
+
+        let mut models: Vec<_> = self
+            .model_breakdown
+            .iter()
+            .map(|(model, tokens)| (model.clone(), *tokens))
+            .collect();
+        models.sort_by(|left, right| right.1.cmp(&left.1));
+        self.models_sorted = models;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.total_input += other.total_input;
+        self.total_output += other.total_output;
+        self.total_cost += other.total_cost;
+        self.message_count += other.message_count;
+        for (model, tokens) in &other.model_breakdown {
+            *self.model_breakdown.entry(model.clone()).or_insert(0) += *tokens;
+        }
+        for (date, daily) in &other.daily {
+            self.daily.entry(*date).or_default().merge(daily);
+        }
+    }
+
+    pub fn aggregate(messages: &[MessageData], date_range: &DateRange) -> Vec<Self> {
+        let mut by_repo: HashMap<String, RepoStats> = HashMap::new();
+        for msg in date_range.filter(messages) {
+            by_repo
+                .entry(msg.repo_path.clone())
+                .or_insert_with(|| Self::for_path(&msg.repo_path))
+                .accumulate(msg);
+        }
+        let mut repos: Vec<Self> = by_repo.into_values().collect();
+        repos.sort_by(|left, right| left.path.cmp(&right.path));
+        for repo in &mut repos {
+            repo.finalize_sorted();
+        }
+        repos
+    }
+
+    pub fn for_dashboard(repos: &[Self], selected_repo: Option<&str>) -> Self {
+        if let Some(repo) = selected_repo {
+            return repos
+                .iter()
+                .find(|stats| stats.path == repo)
+                .cloned()
+                .unwrap_or_default();
+        }
+        let mut combined = repos.iter().fold(
+            Self {
+                path: "All Repositories".to_string(),
+                name: "All Repositories".to_string(),
+                ..Default::default()
+            },
+            |mut acc, repo| {
+                acc.merge(repo);
+                acc
+            },
+        );
+        combined.finalize_sorted();
+        combined
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -51,26 +197,38 @@ struct MessageJson {
     role: String,
     #[serde(rename = "modelID")]
     model_id: Option<String>,
-    #[serde(rename = "providerID")]
-    provider_id: Option<String>,
     cost: Option<f64>,
     tokens: Option<TokenJson>,
     path: Option<PathJson>,
     time: Option<TimeJson>,
 }
 
-#[derive(serde::Deserialize)]
+impl MessageJson {
+    fn into_assistant_data(self, sessions: &HashMap<String, String>) -> Option<MessageData> {
+        if self.role != "assistant" {
+            return None;
+        }
+        let repo_path = self
+            .path
+            .map(|path| path.cwd)
+            .or_else(|| sessions.get(&self.session_id).cloned())
+            .unwrap_or_default();
+        let tokens = self.tokens.unwrap_or_default();
+        Some(MessageData {
+            timestamp: self.time.map(|time| time.created).unwrap_or(0),
+            model_id: self.model_id.unwrap_or_default(),
+            cost: self.cost.unwrap_or(0.0),
+            input_tokens: tokens.input,
+            output_tokens: tokens.output,
+            repo_path,
+        })
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
 struct TokenJson {
     input: u64,
     output: u64,
-    reasoning: u64,
-    cache: Option<CacheJson>,
-}
-
-#[derive(serde::Deserialize)]
-struct CacheJson {
-    read: u64,
-    write: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -80,7 +238,7 @@ struct PathJson {
 
 #[derive(serde::Deserialize)]
 struct TimeJson {
-    created: u64,
+    created: i64,
 }
 
 #[derive(serde::Deserialize)]
@@ -97,230 +255,62 @@ struct ProjectJson {
     worktree: Option<String>,
 }
 
-impl Default for TokenJson {
-    fn default() -> Self {
-        TokenJson {
-            input: 0,
-            output: 0,
-            reasoning: 0,
-            cache: None,
-        }
-    }
+fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
-pub fn scan_opencode_data() -> Vec<MessageData> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    println!("Scanning data in home directory: {}", home);
-    let base = PathBuf::from(&home).join(".local/share/opencode/storage");
-    let message_dir = base.join("message");
-    let session_dir = base.join("session");
-    let project_dir = base.join("project");
-
-    let mut project_map: HashMap<String, String> = HashMap::new();
-
-    if let Ok(entries) = fs::read_dir(&project_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(project) = serde_json::from_str::<ProjectJson>(&content) {
-                        if let Some(worktree) = project.worktree {
-                            project_map.insert(project.id, worktree);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut session_dirs: HashMap<String, String> = HashMap::new();
-
-    if let Ok(entries) = fs::read_dir(&session_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Ok(files) = fs::read_dir(&path) {
-                    for file in files.flatten() {
-                        let file_path = file.path();
-                        if file_path.extension().and_then(|e| e.to_str()) == Some("json") {
-                            if let Ok(content) = fs::read_to_string(&file_path) {
-                                if let Ok(session) = serde_json::from_str::<SessionJson>(&content)
-                                {
-                                    let dir = if session.directory.is_empty() {
-                                        session
-                                            .project_id
-                                            .as_ref()
-                                            .and_then(|pid| project_map.get(pid))
-                                            .cloned()
-                                            .unwrap_or_default()
-                                    } else {
-                                        session.directory
-                                    };
-                                    session_dirs.insert(session.id, dir);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut messages = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(&message_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Ok(files) = fs::read_dir(&path) {
-                    for file in files.flatten() {
-                        let file_path = file.path();
-                        if file_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("msg_") && n.ends_with(".json"))
-                            .unwrap_or(false)
-                        {
-                            if let Ok(content) = fs::read_to_string(&file_path) {
-                                if let Ok(msg) = serde_json::from_str::<MessageJson>(&content) {
-                                    if msg.role == "assistant" {
-                                        let repo_path = msg
-                                            .path
-                                            .as_ref()
-                                            .map(|p| p.cwd.clone())
-                                            .or_else(|| {
-                                                session_dirs.get(&msg.session_id).cloned()
-                                            })
-                                            .unwrap_or_default();
-
-                                        let tokens = msg.tokens.unwrap_or_default();
-                                        let cache = tokens.cache.unwrap_or(CacheJson {
-                                            read: 0,
-                                            write: 0,
-                                        });
-
-                                        messages.push(MessageData {
-                                            timestamp: msg.time.map(|t| t.created).unwrap_or(0),
-                                            model_id: msg.model_id.unwrap_or_default(),
-                                            provider_id: msg.provider_id.unwrap_or_default(),
-                                            cost: msg.cost.unwrap_or(0.0),
-                                            input_tokens: tokens.input,
-                                            output_tokens: tokens.output,
-                                            reasoning_tokens: tokens.reasoning,
-                                            cache_read: cache.read,
-                                            cache_write: cache.write,
-                                            repo_path,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    messages
-}
-
-pub fn aggregate_repos(messages: &[MessageData], date_range: &DateRange) -> Vec<RepoStats> {
-    let filtered = filter_by_date_range(messages, date_range);
-
-    let mut repo_map: HashMap<String, RepoStats> = HashMap::new();
-    for msg in filtered {
-        let stats = repo_map
-            .entry(msg.repo_path.clone())
-            .or_insert_with(|| RepoStats {
-                path: msg.repo_path.clone(),
-                name: std::path::Path::new(&msg.repo_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                ..Default::default()
-            });
-        stats.total_input += msg.input_tokens;
-        stats.total_output += msg.output_tokens;
-        stats.total_cost += msg.cost;
-        stats.message_count += 1;
-        let total_tokens = msg.input_tokens + msg.output_tokens;
-        *stats
-            .model_breakdown
-            .entry(msg.model_id.clone())
-            .or_insert(0) += total_tokens;
-
-        let date = chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
-            .map(|dt| dt.date_naive())
-            .unwrap_or_else(|| chrono::Utc::now().date_naive());
-        let daily = stats.daily.entry(date).or_default();
-        daily.input += msg.input_tokens;
-        daily.output += msg.output_tokens;
-        daily.cost += msg.cost;
-        daily.messages += 1;
-    }
-
-    let mut repos: Vec<RepoStats> = repo_map.into_values().collect();
-    repos.sort_by(|a, b| a.path.cmp(&b.path));
-    println!("Aggregated repositories: {:?}", repos);
-    repos
-}
-
-pub fn get_dashboard_stats(repos: &[RepoStats], selected_repo: Option<&str>) -> RepoStats {
-    if let Some(repo) = selected_repo {
-        repos
-            .iter()
-            .find(|r| r.path == repo)
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        let mut combined = RepoStats::default();
-        combined.path = "All Repositories".to_string();
-        combined.name = "All Repositories".to_string();
-        for repo in repos {
-            combined.total_input += repo.total_input;
-            combined.total_output += repo.total_output;
-            combined.total_cost += repo.total_cost;
-            combined.message_count += repo.message_count;
-
-            for (model, tokens) in &repo.model_breakdown {
-                *combined.model_breakdown.entry(model.clone()).or_insert(0) += *tokens;
-            }
-
-            for (date, daily) in &repo.daily {
-                let d = combined.daily.entry(*date).or_default();
-                d.input += daily.input;
-                d.output += daily.output;
-                d.cost += daily.cost;
-                d.messages += daily.messages;
-            }
-        }
-        combined
-    }
-}
-
-fn filter_by_date_range<'a>(
-    messages: &'a [MessageData],
-    date_range: &DateRange,
-) -> Vec<&'a MessageData> {
-    let now = chrono::Utc::now().timestamp_millis() as u64;
-    let cutoff = match date_range {
-        DateRange::Last7Days => now - 7 * 24 * 60 * 60 * 1000,
-        DateRange::Last30Days => now - 30 * 24 * 60 * 60 * 1000,
-        DateRange::AllTime => 0,
-    };
-
-    messages.iter().filter(|m| m.timestamp >= cutoff).collect()
-}
-
-pub fn get_all_repo_paths(messages: &[MessageData]) -> Vec<String> {
-    let mut repos: Vec<String> = messages
-        .iter()
-        .map(|m| m.repo_path.clone())
-        .collect::<std::collections::HashSet<_>>()
+fn json_files_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    fs::read_dir(dir)
         .into_iter()
-        .collect();
-    repos.sort();
-    repos
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+}
+
+fn json_files_in_subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .flat_map(|sub| json_files_in(&sub).collect::<Vec<_>>())
+}
+
+fn message_files_in_subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    json_files_in_subdirs(dir).filter(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("msg_"))
+    })
+}
+
+fn load_project_map(dir: &Path) -> HashMap<String, String> {
+    json_files_in(dir)
+        .filter_map(|path| read_json::<ProjectJson>(&path))
+        .filter_map(|project| project.worktree.map(|worktree| (project.id, worktree)))
+        .collect()
+}
+
+fn load_session_dirs(dir: &Path, project_map: &HashMap<String, String>) -> HashMap<String, String> {
+    json_files_in_subdirs(dir)
+        .filter_map(|path| read_json::<SessionJson>(&path))
+        .map(|session| {
+            let resolved = if session.directory.is_empty() {
+                session
+                    .project_id
+                    .as_ref()
+                    .and_then(|pid| project_map.get(pid))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                session.directory
+            };
+            (session.id, resolved)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -329,10 +319,8 @@ mod tests {
 
     #[test]
     fn test_scan_data() {
-        let messages = scan_opencode_data();
+        let messages = MessageData::scan_opencode();
         println!("Found {} messages", messages.len());
         assert!(!messages.is_empty(), "Should find some messages");
     }
 }
-
-
