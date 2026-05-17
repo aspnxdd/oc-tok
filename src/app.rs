@@ -1,9 +1,9 @@
 use freya::prelude::*;
 use freya::radio::use_init_radio_station;
+use freya::router::*;
 
-use crate::components::dashboard::Dashboard;
-use crate::components::sidebar::Sidebar;
 use crate::data::MessageData;
+use crate::route::Route;
 use crate::state::{AppChannel, AppState};
 
 pub struct OcTokApp {
@@ -25,12 +25,7 @@ impl App for OcTokApp {
             state
         });
 
-        rect()
-            .theme_background()
-            .expanded()
-            .horizontal()
-            .child(Sidebar)
-            .child(Dashboard)
+        Router::<Route>::new(RouterConfig::default)
     }
 }
 
@@ -59,5 +54,17 @@ fn app_theme() -> Theme {
         success: Color::from_rgb(80, 200, 120),
         ..DARK_COLORS
     };
+    theme.set(
+        "sidebar_item",
+        SideBarItemThemePreference {
+            color: Preference::Reference("text_primary"),
+            background: Preference::Reference("surface_secondary"),
+            active_background: Preference::Reference("active"),
+            hover_background: Preference::Reference("hover"),
+            corner_radius: CornerRadius::new_all(8.).into(),
+            margin: Gaps::new(0., 0., 6., 0.).into(),
+            padding: Gaps::new(8., 12., 8., 12.).into(),
+        },
+    );
     theme
 }

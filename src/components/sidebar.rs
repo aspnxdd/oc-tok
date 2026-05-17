@@ -1,7 +1,9 @@
 use freya::prelude::*;
 use freya::radio::use_radio;
+use freya::router::{RouterContext, use_route};
 
 use crate::data::{DateRange, MessageData, RepoStats};
+use crate::route::Route;
 use crate::state::AppChannel;
 
 #[derive(PartialEq)]
@@ -149,17 +151,12 @@ struct RepoList;
 impl Component for RepoList {
     fn render(&self) -> impl IntoElement {
         let radio = use_radio(AppChannel::All);
-        let (repo_stats, selected_repo) = {
-            let state = radio.read();
-            (state.repo_stats.clone(), state.selected_repo.clone())
-        };
+        let repo_stats = radio.read().repo_stats.clone();
         let len = repo_stats.len();
 
         VirtualScrollView::new(move |index, _| {
-            let stats = &repo_stats[index];
             RepoRow {
-                selected: selected_repo.as_deref() == Some(stats.path.as_str()),
-                stats: stats.clone(),
+                stats: repo_stats[index].clone(),
             }
             .into()
         })
@@ -172,79 +169,43 @@ impl Component for RepoList {
 #[derive(PartialEq)]
 struct RepoRow {
     stats: RepoStats,
-    selected: bool,
 }
 
 impl Component for RepoRow {
     fn render(&self) -> impl IntoElement {
-        let mut radio = use_radio(AppChannel::All);
-        let colors = &use_theme().read().colors;
-        let path = self.stats.path.clone();
+        let current_route = use_route::<Route>();
+        let target = Route::for_repo_path(&self.stats.path);
+        let is_active = current_route == target;
+        let count_color = use_theme().read().colors.text_secondary;
 
-        let on_click = move |_| {
-            let mut state = radio.write();
-            state.selected_repo = if state.selected_repo.as_deref() == Some(path.as_str()) {
-                None
-            } else {
-                Some(path.clone())
-            };
-            state.refresh_dashboard();
+        let on_press = move |_| {
+            let next = if is_active { Route::Home } else { target.clone() };
+            let _ = RouterContext::get().push(next);
         };
 
-        let (row_bg, stripe_color, name_color, count_color) = if self.selected {
-            (
-                colors.active,
-                colors.primary,
-                colors.text_primary,
-                colors.secondary,
-            )
-        } else {
-            (
-                colors.surface_secondary,
-                colors.surface_secondary,
-                colors.text_secondary,
-                colors.text_placeholder,
-            )
-        };
-
-        rect()
-            .key(self.stats.path.clone())
-            .width(Size::fill())
-            .height(Size::px(40.))
-            .margin(Gaps::new(0., 0., 6., 0.))
-            .background(row_bg)
-            .corner_radius(CornerRadius::new_all(8.))
-            .padding(Gaps::new(0., 12., 0., 12.))
-            .on_press(on_click)
-            .horizontal()
-            .spacing(10.)
-            .child(
-                rect()
-                    .width(Size::px(3.))
-                    .height(Size::fill())
-                    .background(stripe_color)
-                    .corner_radius(CornerRadius::new_all(2.)),
-            )
-            .child(
-                rect()
-                    .vertical()
-                    .center()
-                    .expanded()
-                    .child(
-                        label()
-                            .text(self.stats.name.clone())
-                            .font_size(13.)
-                            .color(name_color)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    )
-                    .child(
-                        label()
-                            .text(format!("{} msgs", self.stats.message_count))
-                            .font_size(11.)
-                            .color(count_color)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    ),
-            )
+        ActivableRoute::new(
+            Route::for_repo_path(&self.stats.path),
+            SideBarItem::new()
+                .key(self.stats.path.clone())
+                .on_press(on_press)
+                .child(
+                    rect()
+                        .vertical()
+                        .child(
+                            label()
+                                .text(self.stats.name.clone())
+                                .font_size(13.)
+                                .text_overflow(TextOverflow::Ellipsis),
+                        )
+                        .child(
+                            label()
+                                .text(format!("{} msgs", self.stats.message_count))
+                                .font_size(11.)
+                                .color(count_color)
+                                .text_overflow(TextOverflow::Ellipsis),
+                        ),
+                ),
+        )
     }
 }
 
